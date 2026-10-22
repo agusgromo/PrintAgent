@@ -35,11 +35,31 @@ public class MedpointeService(HttpClient httpClient, ILogger<MedpointeService> l
         ArgumentNullException.ThrowIfNull(items);
 
         Dictionary<PrintQueueItem, string> downloadedPrintFiles = [];
-        Directory.CreateDirectory(hostEnvironment.ContentRootPath);
+        string downloadsDirectory = Path.Combine(hostEnvironment.ContentRootPath, "Downloads");
+        Directory.CreateDirectory(downloadsDirectory);
 
         foreach (PrintQueueItem item in items)
         {
             if (string.IsNullOrWhiteSpace(item.Id)) throw new ArgumentException("Each print queue item must have an ID.", nameof(items));
+
+            string fileName = Path.GetFileName(item.FileName.Trim().Replace('\\', '/'));
+            if (string.IsNullOrWhiteSpace(fileName)) throw new InvalidDataException($"Print job {item.Id} has no filename.");
+
+            string storedFileName = $"{Uri.EscapeDataString(item.Id)}_{fileName}";
+            string filePath = Path.Combine(downloadsDirectory, storedFileName);
+            string oldPath = Path.Combine(hostEnvironment.ContentRootPath, storedFileName);
+            if (!File.Exists(filePath) && File.Exists(oldPath))
+            {
+                File.Move(oldPath, filePath);
+                logger.LogInformation("Moved cached file for job {Id} to {Path}.", item.Id, filePath);
+            }
+
+            if (File.Exists(filePath))
+            {
+                logger.LogDebug("Using cached file for job {Id} at {Path}.", item.Id, filePath);
+                downloadedPrintFiles.Add(item, filePath);
+                continue;
+            }
 
             string requestUri = $"getPrintDoc.mp?id={Uri.EscapeDataString(item.Id)}";
             using HttpResponseMessage response = await httpClient.GetAsync(requestUri, cancellationToken);
@@ -62,11 +82,10 @@ public class MedpointeService(HttpClient httpClient, ILogger<MedpointeService> l
                 throw new InvalidDataException($"PMP returned invalid Base64 for print job {item.Id}.", exception);
             }
 
-            string fileName = Path.GetFileName(item.FileName.Trim().Replace('\\', '/'));
-            if (string.IsNullOrWhiteSpace(fileName)) throw new InvalidDataException($"Print job {item.Id} has no filename.");
-
-            string filePath = Path.Combine(hostEnvironment.ContentRootPath, $"{Guid.NewGuid():N}_{fileName}");
-            await File.WriteAllBytesAsync(filePath, content, cancellationToken);
+            string tempPath = filePath + ".download";
+            await File.WriteAllBytesAsync(tempPath, content, cancellationToken);
+            File.Move(tempPath, filePath, overwrite: true);
+            logger.LogInformation("Downloaded file for job {Id} to {Path}.", item.Id, filePath);
             downloadedPrintFiles.Add(item, filePath);
         }
 
@@ -92,7 +111,7 @@ public class MedpointeService(HttpClient httpClient, ILogger<MedpointeService> l
                 };
                 startInfo.ArgumentList.Add(item.Printer);
                 if (!startInfo.Verbs.Contains("printto", StringComparer.OrdinalIgnoreCase))
-                    throw new InvalidOperationException($"No application is registered to print {Path.GetExtension(filePath)} files to a specific printer.");
+                    throw new NotSupportedException($"No application is registered to print {Path.GetExtension(filePath)} files to a specific printer.");
 
                 using Process process = Process.Start(startInfo)
                     ?? throw new InvalidOperationException($"Unable to start printing job {item.Id}.");

@@ -1,0 +1,24 @@
+name: Build macOS installers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build both disk images
+        run: sh package-mac.sh
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrintAgent-macOS-installers
+          path: artifacts/PrintAgent-Setup-Mac-*.dmg
+          if-no-files-found: error

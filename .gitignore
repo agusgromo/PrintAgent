@@ -3,3 +3,5 @@ obj
 appsettings.Development.json
 Downloads/
 Workers/Jobs/
+Logs/
+artifacts/

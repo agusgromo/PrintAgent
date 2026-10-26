@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using PrintAgent.Models;
@@ -12,19 +13,21 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
     private const string SubmittedSuffix = ".submitted.printjob.json";
     private readonly Dictionary<string, DateTimeOffset> retryAfter = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> submittedJobs = new(StringComparer.OrdinalIgnoreCase);
-    private bool legacyJobsMoved;
-    private string JobsDirectory => Path.Combine(hostEnvironment.ContentRootPath, "Workers", "Jobs");
+    private HashSet<string> availablePrinters = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset nextPrinterRefresh;
+    private int port;
+    private string? lastSettings;
+    private bool settingsReadFailed;
+    private string JobsDirectory => Path.Combine(hostEnvironment.ContentRootPath, "Workers", "Jobs", port.ToString(CultureInfo.InvariantCulture));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("PrintAgent started. Downloads: {Downloads}; local jobs: {Jobs}.",
-            Path.Combine(hostEnvironment.ContentRootPath, "Downloads"), JobsDirectory);
-
         while (!stoppingToken.IsCancellationRequested)
         {
+            RefreshPort();
             try
             {
-                await ProcessQueue(stoppingToken);
+                if (port != 0) await ProcessQueue(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -39,24 +42,57 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
         }
     }
 
+    private void RefreshPort()
+    {
+        string settings;
+        try
+        {
+            settings = File.ReadAllText(Path.Combine(hostEnvironment.ContentRootPath, "appsettings.json"));
+            settingsReadFailed = false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            if (!settingsReadFailed) logger.LogWarning(exception, "Unable to read appsettings.json. Keeping port {Port}.", port);
+            settingsReadFailed = true;
+            return;
+        }
+
+        if (settings == lastSettings) return;
+        lastSettings = settings;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(settings);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("MedpointePort", out JsonElement value) ||
+                value.ValueKind != JsonValueKind.Number ||
+                !value.TryGetInt32(out int newPort) || newPort is < 1 or > 65535)
+            {
+                logger.LogWarning("Invalid MedpointePort in appsettings.json. Keeping port {Port}.", port);
+                return;
+            }
+
+            if (newPort == port) return;
+            port = newPort;
+            medpointeService.Port = newPort;
+            logger.LogInformation("Medpointe port changed to {Port}.", port);
+        }
+        catch (JsonException exception)
+        {
+            logger.LogWarning(exception, "Invalid appsettings.json. Keeping port {Port}.", port);
+        }
+    }
+
     private async Task ProcessQueue(CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(JobsDirectory);
-        if (!legacyJobsMoved)
+        List<string> pendingJobs = [];
+        foreach (string path in Directory.GetFiles(JobsDirectory, "*" + PendingSuffix))
         {
-            foreach (string oldPath in Directory.GetFiles(hostEnvironment.ContentRootPath, "*" + PendingSuffix))
-            {
-                string newPath = Path.Combine(JobsDirectory, Path.GetFileName(oldPath));
-                if (!File.Exists(newPath)) File.Move(oldPath, newPath);
-            }
-            legacyJobsMoved = true;
+            if (path.EndsWith(SubmittedSuffix, StringComparison.OrdinalIgnoreCase))
+                await CompleteSubmitted(path, cancellationToken);
+            else
+                pendingJobs.Add(path);
         }
-
-        List<string> localJobs = Directory.GetFiles(JobsDirectory, "*" + PendingSuffix).ToList();
-        foreach (string path in localJobs.Where(path => path.EndsWith(SubmittedSuffix, StringComparison.OrdinalIgnoreCase)))
-            await CompleteSubmitted(path, cancellationToken);
-
-        List<string> pendingJobs = localJobs.Where(path => !path.EndsWith(SubmittedSuffix, StringComparison.OrdinalIgnoreCase)).ToList();
         List<PrintQueueItem> queue;
         try
         {
@@ -70,16 +106,20 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
 
         if (queue.Count == 0 && pendingJobs.Count == 0) return;
 
-        HashSet<string> printers;
-        try
+        if (DateTimeOffset.UtcNow >= nextPrinterRefresh)
         {
-            printers = await GetAvailablePrinters(cancellationToken);
+            try
+            {
+                availablePrinters = await GetAvailablePrinters(cancellationToken);
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogError(exception, "Unable to check local printers.");
+                availablePrinters = new(StringComparer.OrdinalIgnoreCase);
+            }
+            nextPrinterRefresh = DateTimeOffset.UtcNow.AddSeconds(30);
         }
-        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
-        {
-            logger.LogError(exception, "Unable to check local printers.");
-            printers = new(StringComparer.OrdinalIgnoreCase);
-        }
+        HashSet<string> printers = availablePrinters;
 
         foreach (PrintQueueItem item in queue)
         {
@@ -121,16 +161,18 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
         {
             item = JsonSerializer.Deserialize<PrintQueueItem>(await File.ReadAllTextAsync(path, cancellationToken))
                 ?? throw new InvalidDataException($"Invalid local print job: {path}");
+            if (string.IsNullOrWhiteSpace(item.Id) || string.IsNullOrWhiteSpace(item.Printer))
+                throw new InvalidDataException($"Invalid local print job: {path}");
 
-            if (!submittedJobs.Contains(item.Id))
+            if (!submittedJobs.Contains(path))
             {
                 if (!printers.Contains(item.Printer.Trim()))
                     throw new InvalidOperationException($"Printer {item.Printer} is unavailable.");
 
                 await medpointeService.SetPrintStatus(item.Id, "P", cancellationToken);
                 logger.LogInformation("Job {Id} marked P for printer {Printer}.", item.Id, item.Printer);
-                await medpointeService.SendPrint([item], cancellationToken);
-                submittedJobs.Add(item.Id);
+                await medpointeService.SendPrint(item, cancellationToken);
+                submittedJobs.Add(path);
             }
 
             File.Move(path, SubmittedPath(item.Id), overwrite: true);
@@ -140,7 +182,7 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
         {
             retryAfter[path] = DateTimeOffset.UtcNow.AddMinutes(1);
             logger.LogError(exception, "Unable to process local print job {Path}. Retrying in one minute.", path);
-            if (item is not null && !submittedJobs.Contains(item.Id))
+            if (item is not null && !string.IsNullOrWhiteSpace(item.Id) && !submittedJobs.Contains(path))
                 await MarkError(item.Id, cancellationToken);
             return;
         }
@@ -156,10 +198,11 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
         {
             PrintQueueItem item = JsonSerializer.Deserialize<PrintQueueItem>(await File.ReadAllTextAsync(path, cancellationToken))
                 ?? throw new InvalidDataException($"Invalid local print job: {path}");
+            if (string.IsNullOrWhiteSpace(item.Id)) throw new InvalidDataException($"Invalid local print job: {path}");
             await medpointeService.SetPrintStatus(item.Id, "D", cancellationToken);
             File.Delete(path);
             retryAfter.Remove(path);
-            submittedJobs.Remove(item.Id);
+            submittedJobs.Remove(JobPath(item.Id));
             logger.LogInformation("Job {Id} marked D after submitting it to {Printer}.", item.Id, item.Printer);
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
@@ -189,7 +232,7 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
     private static async Task<HashSet<string>> GetAvailablePrinters(CancellationToken cancellationToken)
     {
         bool windows = OperatingSystem.IsWindows();
-        ProcessStartInfo startInfo = new(windows ? "powershell.exe" : "lpstat")
+        ProcessStartInfo startInfo = new(windows ? "powershell.exe" : "/usr/bin/lpstat")
         {
             UseShellExecute = false,
             RedirectStandardOutput = true,

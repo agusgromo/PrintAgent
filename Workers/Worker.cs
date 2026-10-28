@@ -15,6 +15,8 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
     private readonly HashSet<string> submittedJobs = new(StringComparer.OrdinalIgnoreCase);
     private HashSet<string> availablePrinters = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset nextPrinterRefresh;
+    private bool? printersReady;
+    private bool? pdfReady;
     private int port;
     private string? lastSettings;
     private bool settingsReadFailed;
@@ -93,6 +95,32 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
             else
                 pendingJobs.Add(path);
         }
+        if (DateTimeOffset.UtcNow >= nextPrinterRefresh)
+        {
+            try
+            {
+                availablePrinters = await GetAvailablePrinters(cancellationToken);
+                bool ready = availablePrinters.Count > 0;
+                if (ready != printersReady) logger.LogInformation(ready ? "Usable local printers are available." : "No usable local printers are available. Print jobs will wait.");
+                printersReady = ready;
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogError(exception, "Unable to check local printers.");
+                availablePrinters = new(StringComparer.OrdinalIgnoreCase);
+            }
+            if (availablePrinters.Count > 0)
+            {
+                bool ready = MedpointeService.CanPrintPdf();
+                if (!ready && pdfReady != false) logger.LogWarning("No PDF application supports printing to a specific printer. Print jobs will wait.");
+                if (ready && pdfReady == false) logger.LogInformation("PDF printing is available again.");
+                pdfReady = ready;
+            }
+            nextPrinterRefresh = DateTimeOffset.UtcNow.AddSeconds(30);
+        }
+        HashSet<string> printers = availablePrinters;
+        if (printers.Count == 0 || pdfReady == false) return;
+
         List<PrintQueueItem> queue;
         try
         {
@@ -105,21 +133,6 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
         }
 
         if (queue.Count == 0 && pendingJobs.Count == 0) return;
-
-        if (DateTimeOffset.UtcNow >= nextPrinterRefresh)
-        {
-            try
-            {
-                availablePrinters = await GetAvailablePrinters(cancellationToken);
-            }
-            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
-            {
-                logger.LogError(exception, "Unable to check local printers.");
-                availablePrinters = new(StringComparer.OrdinalIgnoreCase);
-            }
-            nextPrinterRefresh = DateTimeOffset.UtcNow.AddSeconds(30);
-        }
-        HashSet<string> printers = availablePrinters;
 
         foreach (PrintQueueItem item in queue)
         {
@@ -166,8 +179,7 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
 
             if (!submittedJobs.Contains(path))
             {
-                if (!printers.Contains(item.Printer.Trim()))
-                    throw new InvalidOperationException($"Printer {item.Printer} is unavailable.");
+                if (!printers.Contains(item.Printer.Trim())) return;
 
                 await medpointeService.SetPrintStatus(item.Id, "P", cancellationToken);
                 logger.LogInformation("Job {Id} marked P for printer {Printer}.", item.Id, item.Printer);
@@ -243,7 +255,7 @@ public class Worker(ILogger<Worker> logger, MedpointeService medpointeService, I
         {
             startInfo.ArgumentList.Add("-NoProfile");
             startInfo.ArgumentList.Add("-Command");
-            startInfo.ArgumentList.Add("$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Printer | Where-Object { -not $_.WorkOffline -and $_.PrinterStatus -notin 6,7 } | Select-Object -ExpandProperty Name");
+            startInfo.ArgumentList.Add("$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Printer | Where-Object { -not $_.WorkOffline -and $_.PrinterStatus -notin 6,7 -and $_.PortName -notin 'PORTPROMPT:', 'FILE:' } | Select-Object -ExpandProperty Name");
             startInfo.StandardOutputEncoding = Encoding.UTF8;
         }
         else

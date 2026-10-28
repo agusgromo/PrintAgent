@@ -2,6 +2,11 @@ using PrintAgent;
 using PrintAgent.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using System.Globalization;
+
+CultureInfo english = CultureInfo.GetCultureInfo("en-US");
+CultureInfo.CurrentUICulture = english;
+CultureInfo.DefaultThreadCurrentUICulture = english;
 
 bool packaged = !File.Exists(Path.Combine(AppContext.BaseDirectory, "PrintAgent.dll"));
 FileStream? instanceLock = null;

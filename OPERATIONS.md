@@ -1,49 +1,51 @@
-# PrintAgent: instalación y operación
+# PrintAgent: installation and operation
 
-## Crear instaladores
+## Build installers
 
-Incorporá los cambios a la rama principal del repositorio y ejecutá **Actions → Build macOS installers → Run workflow** en GitHub. Cuando termine, descargá el artifact `PrintAgent-macOS-installers` y extraé `PrintAgent-Setup-Mac-osx-arm64.dmg` (Apple Silicon) o `PrintAgent-Setup-Mac-osx-x64.dmg` (Intel). El workflow utiliza un runner macOS y .NET 10; no requiere una Mac propia ni credenciales de Apple. También se puede ejecutar `sh package-mac.sh` en una Mac con el SDK de .NET 10.
+Merge the changes into the repository's main branch, then run **Actions → Build macOS installers → Run workflow** on GitHub. Download the `PrintAgent-macOS-installers` artifact and extract `PrintAgent-Setup-Mac-osx-arm64.dmg` for Apple Silicon or `PrintAgent-Setup-Mac-osx-x64.dmg` for Intel. The workflow uses a macOS runner and .NET 10; it does not require your own Mac or Apple credentials. You can also run `sh package-mac.sh` on a Mac with the .NET 10 SDK.
 
-Para Windows, ejecutá `dotnet publish -c Release -r win-x64` y `ISCC.exe install-windows.iss` desde Windows con Inno Setup 6 o 7. El resultado es `artifacts/PrintAgent-Setup-Windows.exe`. [El uso comercial de Inno Setup requiere una licencia](https://jrsoftware.org/ishelp/topic_purchase.htm).
+On Windows, run `dotnet publish -c Release -r win-x64`, then `ISCC.exe install-windows.iss` with Inno Setup 6 or 7. The result is `artifacts/PrintAgent-Setup-Windows.exe`. [Commercial use of Inno Setup requires a license](https://jrsoftware.org/ishelp/topic_purchase.htm).
 
-## Instalar y configurar
+## Install and configure
 
-En macOS, configurá las colas de impresión para el usuario que ejecutará el agente y comprobá sus nombres con `lpstat -p`. Abrí el `.dmg` correspondiente y ejecutá **PrintAgent Setup.app**. La instalación deja el ejecutable y la configuración en `~/Library/Application Support/PrintAgent/`, copia el instalador a `~/Applications/PrintAgent Setup.app` y registra `~/Library/LaunchAgents/com.medpointe.printagent.plist`. Se inicia automáticamente al ingresar a la cuenta y `launchd` lo vuelve a ejecutar si falla. No requiere .NET en la Mac del cliente. Como usa una firma ad hoc y no está notarizado, macOS puede requerir **Configuración del Sistema → Privacidad y seguridad → Abrir de todos modos**. Comprobá el servicio con `launchctl print gui/$(id -u)/com.medpointe.printagent`.
+On macOS, set up the print queues for the user who will run the agent and check their names with `lpstat -p`. Open the matching `.dmg` and run **PrintAgent Setup.app**. It installs the Worker and configuration in `~/Library/Application Support/PrintAgent/`, asks for the port, and copies the app to `~/Applications/PrintAgent Setup.app`. Open that app again and choose **Support** to change the port, view the last 600 log lines, or open the Downloads folder; choose **Update** to reinstall or **Remove** to uninstall. The LaunchAgent at `~/Library/LaunchAgents/com.medpointe.printagent.plist` starts the Worker when the user signs in and restarts it after a failure. The client Mac does not need .NET. Because the app uses an ad hoc signature and is not notarized, macOS may require **System Settings → Privacy & Security → Open Anyway**. Check the service with `launchctl print gui/$(id -u)/com.medpointe.printagent`.
 
-En Windows, ejecutá `PrintAgent-Setup-Windows.exe`. Se instala en `%LOCALAPPDATA%\PrintAgent` y se inicia al ingresar a esa cuenta de Windows. La aplicación PDF asociada con `.pdf` debe ofrecer la acción `printto`. Los dos instaladores conservan `appsettings.json` en las actualizaciones.
+On Windows, run `PrintAgent-Setup-Windows.exe`. It installs the Worker and **PrintAgent - Support** together. The PrintAgent icon starts in the Windows notification area when the user signs in; if hidden, expand the **^** beside the clock. Double-click the icon to open the support window, which includes **Open downloads**; or right-click the icon to choose **Configure port**, **View logs**, or **Open downloads** directly. The log window shows the last 600 lines and refreshes every second while open; **Pause** lets you read older messages without the view moving. If the port is still `0`, the configuration window opens automatically after installation. You can also open it from **Start → PrintAgent → PrintAgent - Support**. **Exit tray** closes only the support tool; the Worker keeps printing. The support tool stops during updates and uninstallation. Everything is installed in `%LOCALAPPDATA%\PrintAgent`, and the Worker starts when that Windows user signs in. The PDF application associated with `.pdf` must support the `printto` action. Both installers preserve `appsettings.json` during updates.
 
-Editá `MedpointePort` en el `appsettings.json` **instalado**, no en el del repositorio. Debe ser un número entero entre 1 y 65535; el valor inicial `0` deja al agente esperando configuración. Por ejemplo: `"MedpointePort": 443`. Guardá JSON válido. El Worker comprueba el archivo cada cinco segundos y aplica un puerto válido al terminar la operación en curso, sin reiniciar el proceso. Si el archivo está incompleto, el JSON es incorrecto o el puerto está fuera de rango, mantiene el último puerto válido y registra una advertencia. Los trabajos locales se separan por puerto; si se vuelve al anterior, retoma sus trabajos pendientes.
+Edit `MedpointePort` in the **installed** `appsettings.json`, not the repository copy. It must be an integer from 1 to 65535; the initial value `0` leaves the agent waiting for configuration. For example: `"MedpointePort": 443`. Save valid JSON. The Worker checks the file every five seconds and applies a valid port after the current operation, without restarting. If the file is incomplete, the JSON is invalid, or the port is out of range, it keeps the last valid port and logs a warning. Local jobs are separated by port; returning to a previous port resumes its pending jobs.
 
-Para actualizar en macOS, abrí nuevamente **PrintAgent Setup.app** y elegí **Instalar**. Para desinstalar, abrilo y elegí **Quitar**; se detiene y elimina el LaunchAgent y el ejecutable. Se conservan la configuración, los documentos, los trabajos pendientes y los logs para una reinstalación. En Windows, desinstalá desde **Aplicaciones instaladas**. Ambos agentes requieren una sesión del sistema operativo iniciada. Se utiliza LaunchAgent en macOS porque el Worker debe ver las colas de impresión configuradas para ese usuario; un LaunchDaemon tendría otro contexto y podría no verlas o no tener permisos para enviar trabajos.
+To update on macOS, reopen **PrintAgent Setup.app** and choose **Update**. To uninstall, choose **Remove**; this stops and removes the LaunchAgent and executable. Configuration, downloaded documents, pending jobs, and logs remain for a later installation. On Windows, uninstall through **Installed apps**. Both agents require an operating system session. macOS uses a LaunchAgent because the Worker needs access to the print queues configured for that user; a LaunchDaemon would run in a different context and might not see those queues or have permission to print.
 
-Cada agente vuelve a listar sus impresoras cuando hay trabajos y omite trabajos para impresoras que no puede usar. PMP convierte los documentos de la cola a PDF. Configurá cada impresora en un solo agente por cliente hasta que PMP ofrezca una reserva atómica de trabajos.
+Each agent refreshes its available printers every 30 seconds. On Windows, file-output printers using `PORTPROMPT:` or `FILE:` are excluded because they require an interactive save dialog. If there is no usable printer, queued jobs remain unchanged and local pending jobs wait. On Windows, they also wait until a PDF application supports the `printto` action. PMP converts queued documents to PDF. Configure each printer on only one agent per client until PMP supports atomic job reservations.
 
-## Estados de impresión
+## Print statuses
 
-| Estado en PMP | Significado en PrintAgent |
+| Status in PMP | Meaning in PrintAgent |
 | --- | --- |
-| Vacío | En espera. `getPrintQueue` devuelve estos trabajos. Si la impresora no está disponible, el agente no lo toma. |
-| `P` | El agente guardó el trabajo localmente e intenta enviarlo a la impresora. |
-| `E` | Falló el intento local. El agente conserva el trabajo y reintenta aproximadamente cada minuto. |
-| `D` | Se envió el comando de impresión y PMP confirmó el estado. No confirma que haya salido el papel. |
+| Empty | Waiting. `getPrintQueue` returns these jobs. The agent does not take a job unless its printer and PDF print handler are available. |
+| `P` | The agent saved the job locally and is trying to send it to the printer. |
+| `E` | A local attempt failed. The agent keeps the job and retries about once a minute when the printer and PDF print handler are available. |
+| `D` | The print command was sent and PMP confirmed the status. This does not confirm that paper was printed. |
 
-PMP solo devuelve trabajos sin estado desde `getPrintQueue`. El cambio de estado no reserva el trabajo de forma atómica; dos agentes que ven la misma impresora pueden imprimirlo dos veces.
+PMP returns only jobs with no status from `getPrintQueue`. Changing a status does not reserve a job atomically; two agents that see the same printer may print it twice.
 
-## Archivos en disco
+## Files on disk
 
-Todas las rutas siguientes son relativas a la carpeta de instalación: `%LOCALAPPDATA%\PrintAgent` en Windows o `~/Library/Application Support/PrintAgent` en macOS.
+The paths below are relative to the installation directory: `%LOCALAPPDATA%\PrintAgent` on Windows or `~/Library/Application Support/PrintAgent` on macOS. **Open downloads** opens the `Downloads` folder; PDFs are inside its port-specific subfolders.
 
-| Ruta | Contenido |
+| Path | Contents |
 | --- | --- |
-| `Downloads/<puerto>/<id>_<archivo>` | Documento descargado. Se conserva para reintentos. |
-| `Downloads/<puerto>/<id>_<archivo>.download` | Descarga temporal. |
-| `Workers/Jobs/<puerto>/<id>.printjob.json` | Trabajo pendiente de envío o reintento. |
-| `Workers/Jobs/<puerto>/<id>.submitted.printjob.json` | Ya se envió a la impresora; solo falta confirmar `D` con PMP. |
+| `Downloads/<port>/<id>_<file>` | Downloaded document, kept for retries. |
+| `Downloads/<port>/<id>_<file>.download` | Temporary download. |
+| `Workers/Jobs/<port>/<id>.printjob.json` | Job awaiting submission or retry. |
+| `Workers/Jobs/<port>/<id>.submitted.printjob.json` | Already sent to the printer; only PMP status `D` remains to be confirmed. |
 
-Los trabajos y documentos quedan bajo el puerto con que se recibieron. Cambiar de puerto no borra los trabajos del puerto anterior; al volver a él, se retoman.
+Jobs and documents stay under the port on which they were received. Changing ports does not delete old jobs; returning to that port resumes them.
 
 ## Logs
 
-El agente instalado registra errores y cambios de estado en `Logs/printagent.log`. En macOS se puede consultar con `tail -n 50 "$HOME/Library/Application Support/PrintAgent/Logs/printagent.log"`; `launchd` también puede escribir en `Logs/stdout.log` y `Logs/stderr.log`. Durante el desarrollo, los logs aparecen en la terminal.
+The installed agent records errors and status changes in `Logs/printagent.log`. On macOS, inspect it with `tail -n 50 "$HOME/Library/Application Support/PrintAgent/Logs/printagent.log"`. `launchd` may also write to `Logs/stdout.log` and `Logs/stderr.log`. During development, logs appear in the terminal.
 
-Para investigar con más detalle, cambiá `Logging:LogLevel:Default` de `Information` a `Debug` en el `appsettings.json` instalado y volvé a ingresar a la sesión para reiniciar el agente. Solo `MedpointePort` se aplica en caliente; el nivel de log se lee al iniciar. El agente consulta la cola cada cinco segundos y vuelve a listar impresoras cada 30 segundos cuando hay trabajos.
+For more detail, change `Logging:LogLevel:Default` from `Information` to `Debug` in the installed `appsettings.json`, then sign out and back in to restart the agent. Only `MedpointePort` updates while the Worker is running; the log level is read at startup. The agent refreshes printers every 30 seconds and checks the queue every five seconds when printing is possible.
+
+PrintAgent's own messages and installer text are in English. The Worker requests English .NET messages and the C locale for macOS print commands; messages supplied by Windows, printer drivers, or other applications may still use the system language. Existing log entries keep their original text.

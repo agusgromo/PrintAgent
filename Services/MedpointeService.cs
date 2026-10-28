@@ -11,6 +11,9 @@ public class MedpointeService(HttpClient httpClient, ILogger<MedpointeService> l
 
     private string Endpoint(string path) => $"https://medpointe.bmismartcloud.com:{Port}/medpointe/web/{path}";
 
+    public static bool CanPrintPdf() => !OperatingSystem.IsWindows() ||
+        new ProcessStartInfo("document.pdf") { UseShellExecute = true }.Verbs.Contains("printto", StringComparer.OrdinalIgnoreCase);
+
     public async Task<List<PrintQueueItem>> GetPrintQueue(CancellationToken cancellationToken)
     {
         using HttpResponseMessage response = await httpClient.GetAsync(Endpoint("getPrintQueue.mp"), HttpCompletionOption.ResponseHeadersRead, cancellationToken);
@@ -116,6 +119,7 @@ public class MedpointeService(HttpClient httpClient, ILogger<MedpointeService> l
             startInfo.ArgumentList.Add("-d");
             startInfo.ArgumentList.Add(item.Printer);
             startInfo.ArgumentList.Add(filePath);
+            startInfo.Environment["LC_ALL"] = "C";
 
             using Process process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("Unable to start the lp print command.");

@@ -8,12 +8,47 @@ Add-Type -AssemblyName System.Drawing
 
 $showEvent = [System.Threading.EventWaitHandle]::new($false, 'AutoReset', 'Local\PrintAgentSupportShow')
 $stopEvent = [System.Threading.EventWaitHandle]::new($false, 'AutoReset', 'Local\PrintAgentSupportStop')
+$workerStopEvent = [System.Threading.EventWaitHandle]::new($false, 'AutoReset', 'Local\PrintAgentWorkerStop')
+$directory = Split-Path -Parent $MyInvocation.MyCommand.Path
+$workerPath = Join-Path $directory 'PrintAgent.exe'
+$settingsPath = Join-Path $directory 'appsettings.json'
+$logPath = Join-Path $directory 'Logs\printagent.log'
+$downloadsPath = Join-Path $directory 'Downloads'
+$worker = $null
+$nextWorkerStart = [DateTime]::MinValue
+$workerErrorShown = $false
+
+function Find-Worker {
+    $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    $running = Get-CimInstance Win32_Process -Filter "Name = 'PrintAgent.exe'" |
+        Where-Object { $_.ExecutablePath -eq $workerPath -and $_.SessionId -eq $sessionId } | Select-Object -First 1
+    if ($running) { return [System.Diagnostics.Process]::GetProcessById($running.ProcessId) }
+    return $null
+}
+
+function Stop-Worker {
+    [void]$workerStopEvent.Set()
+    if (-not $script:worker) { return }
+    try {
+        if (-not $script:worker.HasExited -and -not $script:worker.WaitForExit(10000)) {
+            $script:worker.Kill()
+            [void]$script:worker.WaitForExit(5000)
+        }
+    }
+    catch { [void][System.Windows.Forms.MessageBox]::Show("Unable to stop PrintAgent: $($_.Exception.Message)", 'PrintAgent') }
+    finally { $script:worker.Dispose(); $script:worker = $null }
+}
+
 if ($Restart -or $Stop) { [void]$stopEvent.Set() }
 $owned = $false
 $mutex = [System.Threading.Mutex]::new($true, 'Local\PrintAgentSupport', [ref]$owned)
 if (-not $owned -and ($Restart -or $Stop)) {
-    try { $owned = $mutex.WaitOne(5000) }
+    try { $owned = $mutex.WaitOne(20000) }
     catch [System.Threading.AbandonedMutexException] { $owned = $true }
+}
+if ($Stop) {
+    $worker = Find-Worker
+    Stop-Worker
 }
 if ($Stop -or -not $owned) {
     if ($Open -and -not $Stop) { [void]$showEvent.Set() }
@@ -21,14 +56,29 @@ if ($Stop -or -not $owned) {
     $mutex.Dispose()
     $showEvent.Dispose()
     $stopEvent.Dispose()
+    $workerStopEvent.Dispose()
     return
 }
 [void]$stopEvent.WaitOne(0)
 
-$directory = Split-Path -Parent $MyInvocation.MyCommand.Path
-$settingsPath = Join-Path $directory 'appsettings.json'
-$logPath = Join-Path $directory 'Logs\printagent.log'
-$downloadsPath = Join-Path $directory 'Downloads'
+function Start-Worker {
+    if ($script:worker) { $script:worker.Dispose(); $script:worker = $null }
+    $script:worker = Find-Worker
+    if ($script:worker) { Stop-Worker }
+    if (-not (Test-Path -LiteralPath $workerPath)) { throw 'PrintAgent.exe was not found.' }
+    [void]$workerStopEvent.WaitOne(0)
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new($workerPath)
+    $startInfo.Arguments = "--parent-pid $PID"
+    $startInfo.WorkingDirectory = $directory
+    $startInfo.UseShellExecute = $false
+    $script:worker = [System.Diagnostics.Process]::Start($startInfo)
+    if (-not $script:worker) { throw 'Unable to start PrintAgent.exe.' }
+}
+
+if ($Restart) {
+    $worker = Find-Worker
+    if ($worker) { Stop-Worker }
+}
 
 function Open-Downloads {
     try {
@@ -169,7 +219,7 @@ $menu = [System.Windows.Forms.ContextMenuStrip]::new()
 $menu.Items.Add('Configure port').Add_Click({ Show-Settings })
 $menu.Items.Add('View logs').Add_Click({ Show-Logs })
 $menu.Items.Add('Open downloads').Add_Click({ Open-Downloads })
-$menu.Items.Add('Exit tray').Add_Click({ $context.ExitThread() })
+$menu.Items.Add('Exit PrintAgent').Add_Click({ $context.ExitThread() })
 $tray = [System.Windows.Forms.NotifyIcon]::new()
 $tray.Icon = [System.Drawing.SystemIcons]::Application
 $tray.Text = 'PrintAgent'
@@ -182,6 +232,14 @@ $timer.Interval = 300
 $timer.Add_Tick({
     if ($stopEvent.WaitOne(0)) { $context.ExitThread(); return }
     if ($showEvent.WaitOne(0)) { Show-Settings }
+    if (($null -eq $script:worker -or $script:worker.HasExited) -and [DateTime]::UtcNow -ge $script:nextWorkerStart) {
+        try { Start-Worker; $script:workerErrorShown = $false }
+        catch {
+            if (-not $script:workerErrorShown) { $tray.ShowBalloonTip(5000, 'PrintAgent', "Unable to start the Worker: $($_.Exception.Message)", 'Error') }
+            $script:workerErrorShown = $true
+        }
+        $script:nextWorkerStart = [DateTime]::UtcNow.AddSeconds(10)
+    }
 })
 $timer.Start()
 try {
@@ -191,6 +249,7 @@ try {
 }
 finally {
     $timer.Stop()
+    Stop-Worker
     $logsTimer.Stop()
     $tray.Visible = $false
     $tray.Dispose()
@@ -201,4 +260,5 @@ finally {
     $mutex.Dispose()
     $showEvent.Dispose()
     $stopEvent.Dispose()
+    $workerStopEvent.Dispose()
 }

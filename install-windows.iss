@@ -22,15 +22,16 @@ Source: "support-windows.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Type: files; Name: "{group}\PrintAgent - Soporte.lnk"
 
 [Icons]
-Name: "{group}\PrintAgent - Support"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\support-windows.ps1"" -Open"; WorkingDir: "{app}"
+Name: "{group}\PrintAgent - Support"; Filename: "{app}\PrintAgent.exe"; Parameters: "--tray -Open"; WorkingDir: "{app}"
+Name: "{userstartup}\PrintAgent"; Filename: "{app}\PrintAgent.exe"; Parameters: "--tray"; WorkingDir: "{app}"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PrintAgent"; ValueData: """{app}\PrintAgent.exe"""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PrintAgentSupport"; ValueData: """{sys}\WindowsPowerShell\v1.0\powershell.exe"" -NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\support-windows.ps1"""; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "PrintAgentSupport"; Flags: deletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "PrintAgent"; Flags: deletevalue
 
 [Run]
-Filename: "{app}\PrintAgent.exe"; Description: "Start PrintAgent now"; Flags: nowait postinstall skipifsilent
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\support-windows.ps1"" -Restart"; Flags: nowait skipifsilent
+Filename: "{app}\PrintAgent.exe"; Parameters: "--tray -Restart -Open"; Flags: nowait skipifsilent
+Filename: "{app}\PrintAgent.exe"; Parameters: "--tray -Restart"; Flags: nowait skipifnotsilent
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\support-windows.ps1"" -Stop"; Flags: runhidden; RunOnceId: "StopPrintAgentSupport"
+Filename: "{app}\PrintAgent.exe"; Parameters: "--tray -Stop"; Flags: runhidden; RunOnceId: "StopPrintAgentSupport"
